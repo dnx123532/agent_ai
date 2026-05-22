@@ -205,21 +205,21 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
 
-    print("╔══════════════════════════════════════╗")
-    print("║          JARVIS V5 — Starting        ║")
-    print("╠══════════════════════════════════════╣")
-    print(f"║  URL  : http://localhost:{SERVER_PORT}       ║")
-    print(f"║  Model: {pick_model():<29}║")
+    print("=" * 42)
+    print("   JARVIS V5 - Starting Server")
+    print("=" * 42)
+    print(f"  URL   : http://localhost:{SERVER_PORT}")
+    print(f"  Model : {pick_model()}")
 
     ollama_ok = is_ollama_running()
-    status = "✅ Running" if ollama_ok else "❌ Offline"
-    print(f"║  Ollama: {status:<28}║")
-    print("╚══════════════════════════════════════╝")
+    status = "Running" if ollama_ok else "OFFLINE"
+    print(f"  Ollama: {status}")
+    print("=" * 42)
 
     if not ollama_ok:
-        print("\n⚠️  PERINGATAN: Ollama tidak terdeteksi!")
-        print("   Jalankan: ollama serve")
-        print("   Lalu pastikan model tersedia: ollama pull deepseek-r1:7b\n")
+        print("\n[WARN] Ollama tidak terdeteksi!")
+        print("  Jalankan : ollama serve")
+        print("  Download model: ollama pull deepseek-r1:7b\n")
 
     uvicorn.run(
         "server.app:app",
