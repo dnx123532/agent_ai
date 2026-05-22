@@ -1,367 +1,328 @@
 # ============================================================
 # agent/core/react_agent.py
-# ReAct Agent Loop: THINK → ACT → OBSERVE — JARVIS V5
-# Mengeksekusi tools berdasarkan respons JSON dari LLM
+# ReAct Agent Loop: THINK -> ACT -> OBSERVE
+# Mendukung WebSocket streaming token-by-token
+# Filter <think>...</think> dari deepseek-r1
 # ============================================================
 
-import json
 import re
+import json
+import queue
+import threading
 from typing import Any, Generator
 
 from agent.config import MAX_STEPS
-from agent.core.llm import chat_with_retry
+from agent.core.llm import chat_with_retry, collect_stream, pick_model
 from agent.core.prompts import SYSTEM_PROMPT, format_observation, format_error
 
-# ── Import semua tools ───────────────────────────────────────
-from agent.tools.file_tools import (
-    list_dir, create_folder, save_text, read_file, move_file
-)
+from agent.tools.file_tools   import list_dir, create_folder, save_text, read_file, move_file
 from agent.tools.office_tools import create_docx, create_xlsx
 from agent.tools.system_tools import system_info, list_processes, run_command
-from agent.tools.web_tools import web_search, open_browser
-from agent.tools.intel_tools import shodan_scan, intel_scan, generate_html_report
+from agent.tools.web_tools    import web_search, open_browser
+from agent.tools.intel_tools  import shodan_scan, intel_scan, generate_html_report
 
-
-# ── Registry tools: nama → fungsi ────────────────────────────
+# ── Registry tools ───────────────────────────────────────────
 TOOL_REGISTRY: dict[str, Any] = {
-    # File tools
     "list_dir":             list_dir,
     "create_folder":        create_folder,
     "save_text":            save_text,
     "read_file":            read_file,
     "move_file":            move_file,
-    # Office tools
     "create_docx":          create_docx,
     "create_xlsx":          create_xlsx,
-    # System tools
     "system_info":          system_info,
     "list_processes":       list_processes,
     "run_command":          run_command,
-    # Web tools
     "web_search":           web_search,
     "open_browser":         open_browser,
-    # Intel tools
     "shodan_scan":          shodan_scan,
     "intel_scan":           intel_scan,
     "generate_html_report": generate_html_report,
 }
 
 
-def _extract_json(text: str) -> dict:
+# ════════════════════════════════════════════════════════════
+# HELPERS
+# ════════════════════════════════════════════════════════════
+
+def _strip_think_tags(text: str) -> str:
     """
-    Ekstrak JSON dari teks LLM yang mungkin mengandung markdown atau teks lain.
-    Robust terhadap:
-    - Teks di luar JSON
-    - Code block markdown (```json ... ```)
-    - Trailing koma yang tidak valid
-    - Whitespace berlebih
+    Hapus blok <think>...</think> dari output deepseek-r1.
+    Model ini generate internal reasoning yang tidak perlu ditampilkan ke user.
 
     Args:
-        text: Raw output dari LLM
+        text: Raw output dari LLM (mungkin berisi <think> blocks)
 
     Returns:
-        Dict hasil parse JSON
-
-    Raises:
-        ValueError: Jika tidak ada JSON valid yang ditemukan
+        Teks bersih tanpa blok think
     """
-    # Coba parse langsung dulu
-    text = text.strip()
+    # Hapus blok <think>...</think> (termasuk multiline)
+    cleaned = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _extract_json(text: str) -> dict:
+    """
+    Ekstrak JSON dari teks LLM yang mungkin mengandung markdown atau think tags.
+    Robust terhadap code blocks, trailing comma, whitespace berlebih.
+    """
+    # Bersihkan think tags dulu
+    text = _strip_think_tags(text).strip()
+
+    # Coba parse langsung
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Coba strip markdown code block
+    # Strip markdown code block
     patterns = [
-        r'```json\s*([\s\S]+?)\s*```',   # ```json ... ```
-        r'```\s*([\s\S]+?)\s*```',        # ``` ... ```
-        r'`(\{[\s\S]+?\})`',              # `{...}`
+        r'```json\s*([\s\S]+?)\s*```',
+        r'```\s*([\s\S]+?)\s*```',
+        r'`(\{[\s\S]+?\})`',
     ]
     for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
+        m = re.search(pattern, text)
+        if m:
             try:
-                return json.loads(match.group(1).strip())
+                return json.loads(m.group(1).strip())
             except json.JSONDecodeError:
                 pass
 
-    # Cari objek JSON dengan bracket matching
-    brace_count = 0
-    start_idx   = None
-
-    for i, char in enumerate(text):
-        if char == '{':
-            if start_idx is None:
-                start_idx = i
-            brace_count += 1
-        elif char == '}':
-            brace_count -= 1
-            if brace_count == 0 and start_idx is not None:
-                candidate = text[start_idx:i+1]
-                # Bersihkan trailing koma sebelum } atau ]
+    # Cari JSON dengan bracket matching
+    brace, start = 0, None
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if start is None:
+                start = i
+            brace += 1
+        elif ch == '}':
+            brace -= 1
+            if brace == 0 and start is not None:
+                candidate = text[start:i+1]
                 candidate = re.sub(r',(\s*[}\]])', r'\1', candidate)
                 try:
                     return json.loads(candidate)
                 except json.JSONDecodeError:
-                    start_idx   = None
-                    brace_count = 0
+                    start = None
+                    brace = 0
 
-    raise ValueError(f"Tidak ada JSON valid dalam respons LLM:\n{text[:500]}")
+    raise ValueError(f"Tidak ada JSON valid:\n{text[:400]}")
 
 
 def _execute_tool(action: str, action_input: dict) -> str:
-    """
-    Eksekusi tool berdasarkan nama dan input.
-
-    Args:
-        action:       Nama tool yang akan dijalankan
-        action_input: Dict parameter untuk tool
-
-    Returns:
-        String hasil eksekusi tool
-    """
+    """Eksekusi tool berdasarkan nama dan input."""
     if action not in TOOL_REGISTRY:
         available = ", ".join(TOOL_REGISTRY.keys())
-        return f"Error: Tool '{action}' tidak ditemukan. Tool yang tersedia: {available}"
-
-    tool_fn = TOOL_REGISTRY[action]
-
+        return f"Error: Tool '{action}' tidak ada. Tersedia: {available}"
     try:
-        # Pastikan action_input adalah dict
         if not isinstance(action_input, dict):
             action_input = {}
-
-        result = tool_fn(**action_input)
-        return str(result)
-
+        return str(TOOL_REGISTRY[action](**action_input))
     except TypeError as e:
-        return f"Error parameter tool '{action}': {e}"
+        return f"Error parameter '{action}': {e}"
     except Exception as e:
-        return f"Error saat menjalankan '{action}': {e}"
+        return f"Error '{action}': {e}"
 
+
+# ════════════════════════════════════════════════════════════
+# NON-STREAMING (untuk /chat non-stream)
+# ════════════════════════════════════════════════════════════
 
 def run_agent(user_message: str) -> dict:
-    """
-    Jalankan ReAct agent loop untuk satu request user.
-    Loop: THINK → ACT → OBSERVE (maksimal MAX_STEPS langkah)
-
-    Args:
-        user_message: Pesan atau instruksi dari user
-
-    Returns:
-        Dict dengan:
-        - "answer":  Jawaban final dari agent
-        - "steps":   List semua langkah (THINK/ACT/OBS)
-        - "success": Boolean apakah agent berhasil
-    """
-    # Inisialisasi conversation
+    """Jalankan ReAct loop, return dict {answer, steps, success}."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": user_message},
     ]
-
     steps: list[dict] = []
     final_answer = ""
 
     for step_num in range(1, MAX_STEPS + 1):
-        # ── THINK: Minta LLM berpikir ─────────────────────────
         try:
-            raw_response = chat_with_retry(messages, temperature=0.3)
+            raw = chat_with_retry(messages, temperature=0.3)
         except Exception as e:
-            return {
-                "answer":  f"Error komunikasi dengan Ollama: {e}",
-                "steps":   steps,
-                "success": False,
-            }
+            return {"answer": f"Error Ollama: {e}", "steps": steps, "success": False}
 
-        # ── Parse JSON dari respons LLM ───────────────────────
         try:
-            parsed = _extract_json(raw_response)
+            parsed = _extract_json(raw)
         except ValueError:
-            # LLM tidak return JSON — anggap sebagai jawaban langsung
-            steps.append({
-                "step":        step_num,
-                "type":        "THINK",
-                "thought":     "LLM tidak mengembalikan JSON terstruktur.",
-                "raw":         raw_response[:300],
-            })
-            return {
-                "answer":  raw_response,
-                "steps":   steps,
-                "success": True,
-            }
+            return {"answer": _strip_think_tags(raw), "steps": steps, "success": True}
 
         thought      = parsed.get("thought", "")
         action       = parsed.get("action", "")
         action_input = parsed.get("action_input", {})
 
-        # Catat langkah THINK
-        steps.append({
-            "step":        step_num,
-            "type":        "THINK",
-            "thought":     thought,
-            "action":      action,
-            "action_input": action_input,
-        })
+        steps.append({"step": step_num, "type": "THINK", "thought": thought,
+                      "action": action, "action_input": action_input})
 
-        # ── Final answer? ─────────────────────────────────────
         if action == "final_answer":
-            if isinstance(action_input, dict):
-                final_answer = action_input.get("answer", str(action_input))
-            else:
-                final_answer = str(action_input)
-
-            steps.append({
-                "step":   step_num,
-                "type":   "ANSWER",
-                "answer": final_answer,
-            })
+            final_answer = action_input.get("answer", str(action_input)) \
+                if isinstance(action_input, dict) else str(action_input)
+            steps.append({"step": step_num, "type": "ANSWER", "answer": final_answer})
             break
 
-        # ── ACT: Eksekusi tool ────────────────────────────────
         if not action:
-            # Tidak ada action — anggap final
-            final_answer = thought or raw_response
+            final_answer = thought or _strip_think_tags(raw)
             break
 
-        steps.append({
-            "step":        step_num,
-            "type":        "ACT",
-            "tool":        action,
-            "input":       action_input,
-        })
+        steps.append({"step": step_num, "type": "ACT", "tool": action, "input": action_input})
 
-        # Jalankan tool
-        try:
-            observation = _execute_tool(action, action_input)
-            obs_message = format_observation(action, observation)
-        except Exception as e:
-            obs_message = format_error(action, str(e))
-            observation = obs_message
+        obs      = _execute_tool(action, action_input)
+        obs_msg  = format_observation(action, obs)
 
-        # ── OBSERVE: Tambahkan hasil ke context ───────────────
-        steps.append({
-            "step":        step_num,
-            "type":        "OBS",
-            "tool":        action,
-            "result":      observation[:500],  # Truncate untuk display
-        })
+        steps.append({"step": step_num, "type": "OBS", "tool": action, "result": obs[:500]})
 
-        # Tambahkan ke conversation history
-        messages.append({"role": "assistant", "content": raw_response})
-        messages.append({"role": "user",      "content": obs_message})
-
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user",      "content": obs_msg})
     else:
-        # Habis MAX_STEPS tanpa final_answer
-        final_answer = (
-            f"Saya telah mencapai batas maksimum {MAX_STEPS} langkah. "
-            "Berikut ringkasan yang saya kumpulkan:\n\n"
-        )
-        # Kumpulkan semua observasi
-        obs_list = [s["result"] for s in steps if s.get("type") == "OBS"]
-        if obs_list:
-            final_answer += "\n".join(obs_list[-3:])  # 3 observasi terakhir
+        obs_list     = [s["result"] for s in steps if s.get("type") == "OBS"]
+        final_answer = "\n".join(obs_list[-3:]) if obs_list else "Selesai."
 
-    return {
-        "answer":  final_answer,
-        "steps":   steps,
-        "success": True,
-    }
+    return {"answer": final_answer, "steps": steps, "success": True}
 
 
-def run_agent_stream(user_message: str) -> Generator[dict, None, None]:
+# ════════════════════════════════════════════════════════════
+# WEBSOCKET STREAMING — kirim token real-time
+# ════════════════════════════════════════════════════════════
+
+def run_agent_ws(user_message: str) -> Generator[dict, None, None]:
     """
-    Versi streaming dari run_agent() — yield setiap langkah secara real-time.
-    Digunakan oleh server untuk Server-Sent Events.
+    ReAct loop dengan WebSocket streaming.
 
-    Args:
-        user_message: Pesan atau instruksi dari user
+    Alur:
+    1. Setiap langkah THINK → yield event {"type":"step", "step_type":"THINK", ...}
+    2. Setiap tool call → yield {"type":"step", "step_type":"ACT"/"OBS", ...}
+    3. Final answer → stream token per token via {"type":"token", "content":"..."}
+    4. Selesai → yield {"type":"done"}
+
+    deepseek-r1 <think> blocks disembunyikan dari user tapi dipakai agent.
 
     Yields:
-        Dict dengan type: "step" (setiap langkah) atau "done" (jawaban final)
+        Dict event untuk dikirim via WebSocket
     """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": user_message},
     ]
 
-    final_answer = ""
-
     for step_num in range(1, MAX_STEPS + 1):
-        # THINK
+
+        # ── Kumpulkan token sambil streaming think indicator ──
+        think_tokens = []
+
+        # Notify frontend: sedang thinking
+        yield {"type": "thinking", "step": step_num}
+
+        # Collect token-by-token, filter think untuk display
+        # tapi tetap simpan full text untuk parsing JSON
+        visible_buffer = ""
+        think_depth    = 0
+
+        def on_token(token: str) -> None:
+            nonlocal think_depth, visible_buffer
+            visible_buffer += token
+            think_tokens.append(token)
+
         try:
-            raw_response = chat_with_retry(messages, temperature=0.3)
+            raw = collect_stream(messages, temperature=0.3, on_token=on_token)
         except Exception as e:
-            yield {"type": "error", "message": f"Error Ollama: {e}"}
+            yield {"type": "error", "message": str(e)}
             return
 
-        # Parse JSON
+        # Parse JSON dari full response (sudah di-strip think tags)
         try:
-            parsed = _extract_json(raw_response)
+            parsed = _extract_json(raw)
         except ValueError:
-            yield {
-                "type":    "done",
-                "answer":  raw_response,
-                "steps":   step_num,
-            }
+            # Bukan JSON — stream sebagai final answer langsung
+            clean = _strip_think_tags(raw)
+            yield {"type": "step", "step_type": "THINK",
+                   "step": step_num, "thought": "Jawaban langsung", "action": "final_answer"}
+            yield from _stream_text(clean)
+            yield {"type": "done"}
             return
 
         thought      = parsed.get("thought", "")
         action       = parsed.get("action", "")
         action_input = parsed.get("action_input", {})
 
-        # Yield THINK step
+        # Kirim step THINK ke frontend
         yield {
-            "type":         "THINK",
+            "type":         "step",
+            "step_type":    "THINK",
             "step":         step_num,
             "thought":      thought,
             "action":       action,
-            "action_input": action_input,
+            "action_input": str(action_input)[:200] if action_input else "",
         }
 
-        # Final answer?
+        # ── Final answer → stream token ke user ──────────────
         if action == "final_answer":
-            if isinstance(action_input, dict):
-                final_answer = action_input.get("answer", str(action_input))
-            else:
-                final_answer = str(action_input)
-            break
+            answer_text = action_input.get("answer", str(action_input)) \
+                if isinstance(action_input, dict) else str(action_input)
 
+            yield from _stream_text(answer_text)
+            yield {"type": "done", "total_steps": step_num}
+            return
+
+        # Tidak ada action → treat sebagai jawaban
         if not action:
-            final_answer = thought or raw_response
-            break
+            clean = _strip_think_tags(raw)
+            yield from _stream_text(clean)
+            yield {"type": "done", "total_steps": step_num}
+            return
 
-        # Yield ACT step
+        # ── ACT: eksekusi tool ────────────────────────────────
         yield {
-            "type":  "ACT",
-            "step":  step_num,
-            "tool":  action,
-            "input": str(action_input)[:200],
+            "type":      "step",
+            "step_type": "ACT",
+            "step":      step_num,
+            "tool":      action,
+            "input":     str(action_input)[:300],
         }
 
-        # Eksekusi tool
-        try:
-            observation = _execute_tool(action, action_input)
-            obs_message = format_observation(action, observation)
-        except Exception as e:
-            obs_message = format_error(action, str(e))
-            observation = obs_message
+        obs     = _execute_tool(action, action_input)
+        obs_msg = format_observation(action, obs)
 
-        # Yield OBS step
+        # ── OBS: kirim hasil tool ─────────────────────────────
         yield {
-            "type":   "OBS",
-            "step":   step_num,
-            "tool":   action,
-            "result": observation[:500],
+            "type":      "step",
+            "step_type": "OBS",
+            "step":      step_num,
+            "tool":      action,
+            "result":    obs[:500],
         }
 
         # Update conversation
-        messages.append({"role": "assistant", "content": raw_response})
-        messages.append({"role": "user",      "content": obs_message})
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user",      "content": obs_msg})
 
-    # Yield final done
-    yield {
-        "type":   "done",
-        "answer": final_answer or "Proses selesai.",
-    }
+    # Habis MAX_STEPS
+    yield {"type": "step", "step_type": "THINK", "step": MAX_STEPS,
+           "thought": f"Batas {MAX_STEPS} langkah tercapai.", "action": "final_answer"}
+    yield from _stream_text(f"Saya telah mencapai batas {MAX_STEPS} langkah.")
+    yield {"type": "done", "total_steps": MAX_STEPS}
+
+
+def _stream_text(text: str, chunk_size: int = 3) -> Generator[dict, None, None]:
+    """
+    Pecah teks menjadi chunk kecil dan yield sebagai token events.
+    Membuat efek typewriter di frontend.
+
+    Args:
+        text:       Teks yang akan di-stream
+        chunk_size: Jumlah karakter per chunk (default: 3)
+
+    Yields:
+        {"type": "token", "content": "..."}
+    """
+    if not text:
+        return
+    for i in range(0, len(text), chunk_size):
+        yield {"type": "token", "content": text[i:i + chunk_size]}
+
+
+# ── Legacy SSE generator (kompatibilitas) ────────────────────
+def run_agent_stream(user_message: str) -> Generator[dict, None, None]:
+    """Legacy SSE wrapper — delegate ke run_agent_ws."""
+    yield from run_agent_ws(user_message)

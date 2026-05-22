@@ -339,6 +339,33 @@ body {
 
 .bubble tr:hover td { background: var(--bg-tertiary); }
 
+/* ── Streaming / Typewriter ────────────────────────────────── */
+.bubble.streaming {
+  min-height: 24px;
+}
+
+.cursor {
+  display: inline-block;
+  color: var(--accent);
+  animation: blink 0.7s step-end infinite;
+  font-weight: 300;
+  margin-left: 1px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.code-lang {
+  display: block;
+  font-size: 0.75em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
 /* ── Steps Panel (THINK/ACT/OBS) ──────────────────────────── */
 .steps-container {
   margin-top: 8px;
