@@ -1,10 +1,18 @@
 # ============================================================
 # agent/config.py
 # Konfigurasi global JARVIS V5
-# Semua API key, URL, dan parameter disimpan di sini
+# API keys dibaca dari .env (tidak di-push ke GitHub)
 # ============================================================
 
 import os
+from pathlib import Path
+
+# Load .env otomatis jika ada
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass  # dotenv opsional, fallback ke os.environ
 
 # ── Direktori Kerja ──────────────────────────────────────────
 # WORK_DIR = root folder project (D:\agent_ai\)
@@ -17,9 +25,9 @@ OLLAMA_FALLBACK: str = "llama3.1:8b"          # Model cadangan jika utama tidak 
 OLLAMA_TIMEOUT: int  = 120                     # Timeout request dalam detik
 
 # ── API Keys Eksternal ───────────────────────────────────────
-# Ganti dengan API key kamu yang asli sebelum digunakan
-TAVILY_API_KEY: str  = "ISI_API_KEY_KAMU"     # https://tavily.com
-SHODAN_API_KEY: str  = "ISI_API_KEY_KAMU"     # https://shodan.io
+# Dibaca dari .env (lihat .env di root project)
+TAVILY_API_KEY: str  = os.environ.get("TAVILY_API_KEY", "")
+SHODAN_API_KEY: str  = os.environ.get("SHODAN_API_KEY", "")
 
 # ── ReAct Agent ──────────────────────────────────────────────
 MAX_STEPS: int = 8          # Maksimum langkah THINK→ACT→OBS per request
