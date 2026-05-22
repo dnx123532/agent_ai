@@ -53,10 +53,11 @@ TOOL_DEFS: str = """
    - sort_by: "memory" atau "cpu"
    - limit: jumlah proses yang ditampilkan
 
-10. run_command(command)
-    - Jalankan perintah shell/terminal
-    - command: perintah yang akan dieksekusi
-    - PERHATIAN: hanya untuk perintah yang aman
+10. run_command(command, timeout=120)
+    - Jalankan perintah shell/terminal apapun
+    - command: perintah yang akan dieksekusi (nmap, ping, netstat, curl, dll)
+    - timeout: detik maksimal eksekusi (default 120, naikkan untuk scan panjang)
+    - Contoh: run_command("nmap -sV 192.168.1.1"), run_command("netstat -an")
 
 ### WEB TOOLS:
 11. web_search(query, max_results=5)

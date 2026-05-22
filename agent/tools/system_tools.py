@@ -164,39 +164,36 @@ def list_processes(sort_by: str = "memory", limit: int = 20) -> str:
         return f"Error list_processes: {e}"
 
 
-def run_command(command: str) -> str:
+def run_command(command: str, timeout: int = 120) -> str:
     """
-    Jalankan perintah shell/terminal dengan timeout.
-    Hanya untuk perintah yang aman — BUKAN untuk perintah destruktif.
+    Jalankan perintah shell/terminal.
+    Mendukung semua perintah termasuk nmap, netcat, curl, dll.
 
     Args:
-        command: Perintah yang akan dijalankan
+        command: Perintah yang akan dijalankan (nmap, ping, netstat, dll)
+        timeout: Timeout dalam detik (default 120, naikkan untuk scan panjang)
 
     Returns:
         Output stdout/stderr dari perintah atau pesan error
     """
-    # Daftar perintah berbahaya yang diblokir
+    # Hanya blokir perintah yang benar-benar merusak OS/disk
     BLOCKED_COMMANDS = [
-        "rm -rf", "del /f", "format", "mkfs",
-        "shutdown", "reboot", "halt", "poweroff",
-        "DROP TABLE", "DROP DATABASE",
-        ":(){:|:&};:"  # Fork bomb
+        "format c:", "mkfs", ":(){:|:&};:",  # Fork bomb & format disk
+        "rd /s /q c:\\windows", "del /f /s /q c:\\windows",
     ]
 
     try:
-        # Cek perintah berbahaya
         cmd_lower = command.lower()
         for blocked in BLOCKED_COMMANDS:
             if blocked.lower() in cmd_lower:
-                return f"⛔ Perintah diblokir karena berpotensi merusak sistem: '{blocked}'"
+                return f"Perintah diblokir (merusak sistem): '{blocked}'"
 
-        # Jalankan perintah dengan timeout 30 detik
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
             encoding="utf-8",
             errors="replace"
         )
@@ -204,21 +201,21 @@ def run_command(command: str) -> str:
         output_lines = []
 
         if result.stdout.strip():
-            output_lines.append(f"📤 Output:\n{result.stdout.strip()}")
+            output_lines.append(f"[OUTPUT]\n{result.stdout.strip()}")
 
         if result.stderr.strip():
-            output_lines.append(f"⚠️ Stderr:\n{result.stderr.strip()}")
+            output_lines.append(f"[STDERR]\n{result.stderr.strip()}")
 
-        if result.returncode != 0:
-            output_lines.append(f"🔴 Exit code: {result.returncode}")
-        else:
-            output_lines.append(f"✅ Exit code: 0 (sukses)")
+        output_lines.append(
+            f"[EXIT CODE] {result.returncode} ({'OK' if result.returncode == 0 else 'ERROR'})"
+        )
 
-        return "\n\n".join(output_lines) if output_lines else "✅ Perintah selesai tanpa output."
+        return "\n\n".join(output_lines) if output_lines else "Perintah selesai tanpa output."
 
     except subprocess.TimeoutExpired:
-        return "⏰ Error: Perintah timeout setelah 30 detik."
+        return f"[TIMEOUT] Perintah timeout setelah {timeout}s. Naikkan parameter timeout untuk scan panjang."
     except FileNotFoundError:
-        return f"Error: Perintah '{command.split()[0]}' tidak ditemukan."
+        cmd_name = command.split()[0] if command.split() else command
+        return f"[NOT FOUND] Perintah '{cmd_name}' tidak ditemukan. Pastikan sudah terinstall."
     except Exception as e:
         return f"Error run_command: {e}"
