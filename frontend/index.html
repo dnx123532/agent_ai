@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS V5 — AI Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- Favicon inline SVG -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── HEADER ──────────────────────────────────────────── -->
+  <header id="header">
+    <div class="header-left">
+      <span class="logo">JARVIS</span>
+      <span class="version-badge">V5</span>
+    </div>
+    <div class="header-right">
+      <div class="status-dot">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-label">Checking...</span>
+      </div>
+      <span class="model-label" id="model-label">—</span>
+    </div>
+  </header>
+
+  <!-- ── CHAT AREA ───────────────────────────────────────── -->
+  <main id="chat-area">
+
+    <!-- Welcome screen -->
+    <div class="welcome">
+      <div class="welcome-logo">⚡ JARVIS</div>
+      <div class="welcome-sub">AI Assistant — 100% Local · Powered by Ollama</div>
+
+      <div class="welcome-hints">
+        <span class="hint-chip" data-query="Tampilkan isi folder D:/agent_ai">
+          📁 List folder
+        </span>
+        <span class="hint-chip" data-query="Tampilkan informasi sistem komputer ini">
+          🖥️ Info sistem
+        </span>
+        <span class="hint-chip" data-query="Cari berita terbaru tentang AI">
+          🔍 Web search
+        </span>
+        <span class="hint-chip" data-query="Buat file teks dengan nama test.txt berisi Hello World">
+          📄 Buat file
+        </span>
+        <span class="hint-chip" data-query="Tampilkan proses yang sedang berjalan">
+          ⚙️ Proses aktif
+        </span>
+        <span class="hint-chip" data-query="Buat dokumen Word dengan nama laporan.docx berisi laporan harian">
+          📝 Buat dokumen
+        </span>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── INPUT BAR ────────────────────────────────────────── -->
+  <footer id="input-bar">
+    <textarea
+      id="user-input"
+      placeholder="Ketik pesan atau instruksi... (Enter kirim, Shift+Enter baris baru)"
+      rows="1"
+      autocomplete="off"
+      spellcheck="false"
+    ></textarea>
+    <button id="send-btn" type="button">SEND</button>
+  </footer>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
